@@ -1,0 +1,52 @@
+trigger:
+  branches:
+    include:
+      - main
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  buildConfiguration: Release
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  # Nom de la Service Connection Azure DevOps -> abonnement Azure (à créer manuellement).
+  azureServiceConnection: 'jalex-agents-poc-azure'
+  apiAppName: 'app-jalex-api'
+  blazorAppName: 'app-jalex-blazor'
+
+steps:
+  - task: UseDotNet@2
+    displayName: Install .NET SDK
+    inputs:
+      packageType: sdk
+      version: '10.0.x'
+
+  - script: dotnet restore
+    displayName: dotnet restore
+
+  - script: >
+      dotnet publish src/Api/Api.csproj --configuration $(buildConfiguration)
+      --no-restore --output $(Build.ArtifactStagingDirectory)/api
+    displayName: Publish Api
+
+  - script: >
+      dotnet publish src/BlazorApp/BlazorApp.csproj --configuration $(buildConfiguration)
+      --no-restore --output $(Build.ArtifactStagingDirectory)/blazor
+    displayName: Publish BlazorApp
+
+  - task: AzureWebApp@1
+    displayName: Deploy Api to App Service
+    inputs:
+      azureSubscription: $(azureServiceConnection)
+      appType: webAppLinux
+      appName: $(apiAppName)
+      package: $(Build.ArtifactStagingDirectory)/api
+
+  - task: AzureWebApp@1
+    displayName: Deploy BlazorApp to App Service
+    inputs:
+      azureSubscription: $(azureServiceConnection)
+      appType: webAppLinux
+      appName: $(blazorAppName)
+      package: $(Build.ArtifactStagingDirectory)/blazor

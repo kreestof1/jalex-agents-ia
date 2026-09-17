@@ -1,0 +1,50 @@
+@page "/items"
+@rendermode InteractiveServer
+@using BlazorApp.Services
+@inject ItemsApiClient ItemsApiClient
+
+<PageTitle>Items</PageTitle>
+
+<h1>Items</h1>
+
+<p>Liste des éléments récupérés depuis l'API.</p>
+
+@if (items == null)
+{
+    <p><em>Chargement...</em></p>
+}
+else if (items.Count == 0)
+{
+    <p><em>Aucun élément.</em></p>
+}
+else
+{
+    <table class="table">
+        <thead>
+            <tr>
+                <th>Id</th>
+                <th>Nom</th>
+                <th>Description</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var item in items)
+            {
+                <tr>
+                    <td>@item.Id</td>
+                    <td>@item.Name</td>
+                    <td>@item.Description</td>
+                </tr>
+            }
+        </tbody>
+    </table>
+}
+
+@code {
+    private IReadOnlyList<BlazorApp.Models.Item>? items;
+
+    protected override async Task OnInitializedAsync()
+    {
+        items = await ItemsApiClient.GetItemsAsync();
+    }
+}

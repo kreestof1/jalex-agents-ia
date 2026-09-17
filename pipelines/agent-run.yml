@@ -1,0 +1,124 @@
+# Pipeline déclenchée uniquement via l'API REST Pipelines (voir tools/agent-webhook),
+# jamais par un trigger CI classique. Orchestre les agents Planner, Backend, Frontend
+# et Reviewer-Fixer sur le work item passé en paramètre.
+trigger: none
+pr: none
+
+parameters:
+  - name: workItemId
+    type: string
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  - group: agents-secrets # doit contenir ANTHROPIC_API_KEY, AZURE_DEVOPS_PAT (secrets)
+  - name: AZURE_DEVOPS_ORG_URL
+    value: 'https://dev.azure.com/VOTRE_ORG' # à adapter
+  - name: AZURE_DEVOPS_PROJECT
+    value: 'jalex-agents-poc' # à adapter
+  - name: AZURE_DEVOPS_REPOSITORY
+    value: 'jalex-agents-poc' # nom du repo Azure Repos, à adapter
+  - name: WORK_ITEM_ID
+    value: ${{ parameters.workItemId }}
+  - name: MAX_ATTEMPTS
+    value: '3'
+
+steps:
+  - checkout: self
+    persistCredentials: true
+    clean: true
+
+  - task: UseDotNet@2
+    displayName: Install .NET SDK
+    inputs:
+      packageType: sdk
+      version: '10.0.x'
+
+  - task: NodeTool@0
+    displayName: Install Node.js
+    inputs:
+      versionSpec: '20.x'
+
+  - script: npm install -g @anthropic-ai/claude-code
+    displayName: Install Claude Code CLI
+
+  - script: |
+      git config user.email "agents-ia@jalex-agents-poc.local"
+      git config user.name "Jalex Agents IA"
+      chmod +x tools/agent-scripts/*.sh
+      git checkout -b "agent/wi-${WORK_ITEM_ID}-$(Build.BuildId)"
+    displayName: Créer la branche de l'agent
+    env:
+      WORK_ITEM_ID: $(WORK_ITEM_ID)
+
+  - script: tools/agent-scripts/get-work-item.sh
+    displayName: 'Étape 1 — Récupérer le ticket'
+    env:
+      AZURE_DEVOPS_ORG_URL: $(AZURE_DEVOPS_ORG_URL)
+      AZURE_DEVOPS_PROJECT: $(AZURE_DEVOPS_PROJECT)
+      AZURE_DEVOPS_PAT: $(AZURE_DEVOPS_PAT)
+      WORK_ITEM_ID: $(WORK_ITEM_ID)
+
+  - script: tools/agent-scripts/run-planner.sh
+    displayName: 'Étape 2 — Agent Planner'
+    env:
+      ANTHROPIC_API_KEY: $(ANTHROPIC_API_KEY)
+
+  - script: tools/agent-scripts/run-scoped-agent.sh backend
+    displayName: 'Étape 3 — Agent Backend'
+    env:
+      ANTHROPIC_API_KEY: $(ANTHROPIC_API_KEY)
+
+  - script: tools/agent-scripts/run-scoped-agent.sh frontend
+    displayName: 'Étape 4 — Agent Frontend'
+    env:
+      ANTHROPIC_API_KEY: $(ANTHROPIC_API_KEY)
+
+  - script: |
+      set +e
+      tools/agent-scripts/reviewer-fixer.sh
+      echo "##vso[task.setvariable variable=reviewerFixerExitCode]$?"
+    displayName: 'Étape 5 — Agent Reviewer-Fixer (build/tests + corrections)'
+    env:
+      ANTHROPIC_API_KEY: $(ANTHROPIC_API_KEY)
+      MAX_ATTEMPTS: $(MAX_ATTEMPTS)
+
+  - script: |
+      set -euo pipefail
+      if git diff --cached --quiet && git diff --quiet; then
+        echo "Aucun changement produit par les agents."
+        echo "## Automatisation agents\n\nAucun changement n'a été produit pour ce ticket." > comment.txt
+        tools/agent-scripts/comment-work-item.sh comment.txt
+        exit 1
+      fi
+      git add -A
+      git commit -m "Agent: implémentation automatique du ticket #${WORK_ITEM_ID}"
+      git push origin "HEAD:refs/heads/agent/wi-${WORK_ITEM_ID}-$(Build.BuildId)"
+      tools/agent-scripts/create-pull-request.sh
+      PR_ID=$(cat pr-id.txt)
+      printf "## Automatisation agents\n\nUne Pull Request a ete creee automatiquement : !%s\n" "$PR_ID" > comment.txt
+      tools/agent-scripts/comment-work-item.sh comment.txt
+    displayName: 'Étape 6 — Commit, push et création de la PR'
+    condition: eq(variables['reviewerFixerExitCode'], '0')
+    env:
+      AZURE_DEVOPS_ORG_URL: $(AZURE_DEVOPS_ORG_URL)
+      AZURE_DEVOPS_PROJECT: $(AZURE_DEVOPS_PROJECT)
+      AZURE_DEVOPS_PAT: $(AZURE_DEVOPS_PAT)
+      AZURE_DEVOPS_REPOSITORY: $(AZURE_DEVOPS_REPOSITORY)
+      WORK_ITEM_ID: $(WORK_ITEM_ID)
+      SOURCE_BRANCH: 'agent/wi-$(WORK_ITEM_ID)-$(Build.BuildId)'
+
+  - script: |
+      set -euo pipefail
+      printf "## Automatisation agents — echec\n\nLe build/tests echouent encore apres %s tentatives de correction automatique. Aucune Pull Request n'a ete creee.\n\nVoir les logs de la pipeline (build #%s) pour le detail.\n" "${MAX_ATTEMPTS}" "$(Build.BuildId)" > comment.txt
+      tools/agent-scripts/comment-work-item.sh comment.txt
+      exit 1
+    displayName: 'Étape 6bis — Notifier l’échec sur le ticket'
+    condition: ne(variables['reviewerFixerExitCode'], '0')
+    env:
+      AZURE_DEVOPS_ORG_URL: $(AZURE_DEVOPS_ORG_URL)
+      AZURE_DEVOPS_PROJECT: $(AZURE_DEVOPS_PROJECT)
+      AZURE_DEVOPS_PAT: $(AZURE_DEVOPS_PAT)
+      WORK_ITEM_ID: $(WORK_ITEM_ID)
+      MAX_ATTEMPTS: $(MAX_ATTEMPTS)
